@@ -1,14 +1,14 @@
-#include <WiFi.h>
-#include "ThingSpeak.h"
-#include <DHT.h>
-#include "MAX30105.h"
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-#include "heartRate.h"      // Maxim's heart rate algorithm
-#include "spo2_algorithm.h" // Maxim's SpO2 algorithm
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/semphr.h>
+#include <WiFi.h>              // Library to connect and manage Wi-Fi functionality on ESP32.
+#include "ThingSpeak.h"        // Library to interact with ThingSpeak API for uploading sensor data to the cloud.
+#include <DHT.h>               // Library to interact with DHT sensors (e.g., DHT11/DHT22) for temperature and humidity readings.
+#include "MAX30105.h"          // Library to interact with MAX30105 sensor (used for heart rate and SpO2 measurements).
+#include <Wire.h>              // Library to communicate with I2C devices (such as the MAX30105) over I2C bus.
+#include <LiquidCrystal_I2C.h> // Library to control LCD displays over I2C interface (used for showing real-time sensor data).
+#include "heartRate.h"         // External library (or code) to compute heart rate from MAX30105 sensor data using Maxim's algorithm.
+#include "spo2_algorithm.h"    // External library (or code) to compute SpO2 (blood oxygen saturation) using MAX30105 sensor data.
+#include <freertos/FreeRTOS.h> // FreeRTOS library to manage tasks, semaphores, and other real-time operating system features on ESP32.
+#include <freertos/task.h>     // Provides task-related functionality for FreeRTOS, such as creating and managing tasks.
+#include <freertos/semphr.h>   // Provides semaphore-related functionality for synchronizing access to shared resources in FreeRTOS.
 
 // Explicitly define I2C_BUFFER_LENGTH to avoid redefinition warning
 #define I2C_BUFFER_LENGTH 128
@@ -55,7 +55,7 @@ SemaphoreHandle_t bufferMutex;
 
 // ---- AD8232 Heartbeat Variables ----
 unsigned long lastEcgBeat = 0;
-const int ecgThreshold = 512; // Adjust this threshold as needed
+const int ecgThreshold = 600; // Adjust this threshold to reduce noise
 
 // Wi-Fi configuration
 const char *ssid = "mohin";           // Replace with your Wi-Fi SSID
@@ -75,14 +75,17 @@ void lcdTask(void *pvParameters);
 void thingSpeakTask(void *pvParameters);
 
 // Function to initialize sensors
-void initializeSensors() {
+void initializeSensors()
+{
   // --- MAX30102 Setup ---
-  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD))
+  {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Sensor Error");
     Serial.println("MAX30102 not found. Check wiring.");
-    while (1);
+    while (1)
+      ;
   }
   particleSensor.setup(0x3F, 4, 2, 100, 411, 16384);
   particleSensor.setPulseAmplitudeRed(0x3F);
@@ -98,24 +101,49 @@ void initializeSensors() {
 }
 
 // Function to connect to Wi-Fi with timeout
-bool connectToWiFi() {
+bool connectToWiFi()
+{
   WiFi.begin(ssid, password);
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) { // 20 attempts, 1 second each
+  while (WiFi.status() != WL_CONNECTED && attempts < 20)
+  { // 20 attempts, 1 second each
     delay(1000);
     Serial.println("Connecting to WiFi...");
     attempts++;
   }
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED)
+  {
     Serial.println("Connected to WiFi");
     return true;
-  } else {
+  }
+  else
+  {
     Serial.println("Failed to connect to WiFi");
     return false;
   }
 }
 
-void setup() {
+// Function to filter and smooth BPM readings (Moving Average)
+#define FILTER_SIZE 5
+int bpmHistory[FILTER_SIZE] = {0}; // Holds the last 5 BPM values
+int bpmIndex = 0;
+
+int applyBpmFilter(int newBpm)
+{
+  bpmHistory[bpmIndex] = newBpm;
+  bpmIndex = (bpmIndex + 1) % FILTER_SIZE;
+
+  int sum = 0;
+  for (int i = 0; i < FILTER_SIZE; i++)
+  {
+    sum += bpmHistory[i];
+  }
+
+  return sum / FILTER_SIZE;
+}
+
+void setup()
+{
   Serial.begin(115200);
   Wire.begin();
 
@@ -133,11 +161,13 @@ void setup() {
   lcd.clear();
 
   // --- Wi-Fi Setup ---
-  if (!connectToWiFi()) {
+  if (!connectToWiFi())
+  {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("WiFi Error");
-    while (1);
+    while (1)
+      ;
   }
 
   // --- ThingSpeak Setup ---
@@ -205,10 +235,12 @@ void max30102Task(void *pvParameters)
         sensorData.hr_valid = hr_valid;
         if (hr_valid)
         {
-          sensorData.bpm = heart_rate; // Store Maxim BPM
+          // Apply filter to smooth BPM value
+          int filteredBpm = applyBpmFilter(heart_rate);
+          sensorData.bpm = filteredBpm;
           Serial.println("=== Heart Rate ===");
           Serial.print("Maxim BPM: ");
-          Serial.println(heart_rate);
+          Serial.println(filteredBpm);
         }
         else
         {
@@ -268,9 +300,6 @@ void ecgTask(void *pvParameters)
       {
         sensorData.ecgValue = ecgValue;
         sensorData.ecgBpm = newEcgBpm;
-        // Comment out BPM print
-        // Serial.print("Heartbeat! BPM (ECG): ");
-        // Serial.println(newEcgBpm);
         xSemaphoreGive(dataMutex);
       }
     }
@@ -282,62 +311,76 @@ void ecgTask(void *pvParameters)
   }
 }
 
-void lcdTask(void *pvParameters) {
+void lcdTask(void *pvParameters)
+{
   static int displayState = 0;
   SensorData lastDisplayedData = {0, -999, 0, 0, 0, 0, false, false};
-  while (1) {
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      if (memcmp(&sensorData, &lastDisplayedData, sizeof(SensorData)) != 0) { // Only update if data has changed
+  while (1)
+  {
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+      if (memcmp(&sensorData, &lastDisplayedData, sizeof(SensorData)) != 0)
+      { // Only update if data has changed
         lcd.clear();
         lcd.setCursor(0, 0);
-        switch (displayState) {
-          case 0:
-            if (sensorData.hr_valid && sensorData.bpm > 0) {
-              lcd.print("BPM: ");
-              lcd.print((int)sensorData.bpm);
-            } else {
-              lcd.print("BPM: N/A");
-            }
-            break;
-          case 1:
-            if (sensorData.spo2_valid && sensorData.spo2 >= 0 && sensorData.spo2 <= 100) {
-              lcd.print("SpO2: ");
-              lcd.print(sensorData.spo2);
-              lcd.print("%");
-            } else {
-              lcd.print("SpO2: N/A");
-            }
-            break;
-          case 2:
-            if (!isnan(sensorData.temperature)) {
-              lcd.print("Temp: ");
-              lcd.print(sensorData.temperature, 1);
-              lcd.print((char)223);
-              lcd.print("C");
-            } else {
-              lcd.print("Temp: N/A");
-            }
-            break;
-          case 3:
-            if (!isnan(sensorData.humidity)) {
-              lcd.print("Hum: ");
-              lcd.print(sensorData.humidity, 0);
-              lcd.print("%");
-            } else {
-              lcd.print("Hum: N/A");
-            }
-            break;
-          case 4:
-            lcd.print("ECG: ");
-            lcd.print(sensorData.ecgValue);
-            break;
+        switch (displayState)
+        {
+        case 0:
+          if (sensorData.hr_valid && sensorData.bpm > 0)
+          {
+            lcd.print("BPM: ");
+            lcd.print((int)sensorData.bpm);
+          }
+          else
+          {
+            lcd.print("BPM: N/A");
+          }
+          break;
+        case 1:
+          if (sensorData.spo2_valid && sensorData.spo2 >= 0 && sensorData.spo2 <= 100)
+          {
+            lcd.print("SpO2: ");
+            lcd.print(sensorData.spo2);
+            lcd.print("%");
+          }
+          else
+          {
+            lcd.print("SpO2: N/A");
+          }
+          break;
+        case 2:
+          if (!isnan(sensorData.temperature))
+          {
+            lcd.print("Temp: ");
+            lcd.print(sensorData.temperature, 1);
+            lcd.print((char)223);
+            lcd.print("C");
+          }
+          else
+          {
+            lcd.print("Temp: N/A");
+          }
+          break;
+        case 3:
+          if (!isnan(sensorData.humidity))
+          {
+            lcd.print("Hum: ");
+            lcd.print(sensorData.humidity, 0);
+            lcd.print("%");
+          }
+          else
+          {
+            lcd.print("Hum: N/A");
+          }
+          break;
         }
-        lastDisplayedData = sensorData; // Update last displayed data
+        displayState = (displayState + 1) % 4; // Rotate through 4 data types
+        lastDisplayedData = sensorData;        // Save last displayed data
       }
       xSemaphoreGive(dataMutex);
-      displayState = (displayState + 1) % 5;
     }
-    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Update display every 1 second
   }
 }
 
@@ -347,55 +390,29 @@ void thingSpeakTask(void *pvParameters)
   {
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
-      // Debug all parameters before sending
-      Serial.println("=== ThingSpeak Update ===");
-      Serial.print("Maxim BPM before send: ");
-      Serial.println(sensorData.bpm);
-      Serial.print("SpO2 before send: ");
-      Serial.print(sensorData.spo2);
-      Serial.print(", Valid: ");
-      Serial.println(sensorData.spo2_valid);
-      Serial.print("ECG Value: ");
-      Serial.println(sensorData.ecgValue);
-      Serial.print("Temperature: ");
-      Serial.println(sensorData.temperature);
-      Serial.print("Humidity: ");
-      Serial.println(sensorData.humidity);
+      ThingSpeak.setField(1, sensorData.bpm);
+      ThingSpeak.setField(2, sensorData.spo2);
+      ThingSpeak.setField(3, sensorData.temperature);
+      ThingSpeak.setField(4, sensorData.humidity);
 
-      ThingSpeak.setField(1, sensorData.bpm); // Maxim BPM
-      if (sensorData.spo2_valid && sensorData.spo2 >= 0 && sensorData.spo2 <= 100)
-      {
-        ThingSpeak.setField(2, sensorData.spo2);
-        Serial.print("Sending SpO2 to ThingSpeak: ");
-        Serial.println(sensorData.spo2);
-      }
-      else
-      {
-        Serial.println("Skipping SpO2 send: Invalid or out-of-range value");
-      }
-      ThingSpeak.setField(3, sensorData.ecgValue);
-      ThingSpeak.setField(4, sensorData.temperature);
-      ThingSpeak.setField(5, sensorData.humidity);
-
-      int responseCode = ThingSpeak.writeFields(channelID, apiKey);
+      long responseCode = ThingSpeak.writeFields(channelID, apiKey);
       if (responseCode == 200)
       {
-        Serial.println("Data sent to ThingSpeak successfully!");
+        Serial.println("Data uploaded successfully.");
       }
       else
       {
-        Serial.print("Error sending data to ThingSpeak: ");
+        Serial.print("Failed to upload data. Response code: ");
         Serial.println(responseCode);
       }
       xSemaphoreGive(dataMutex);
     }
 
-    vTaskDelay(pdMS_TO_TICKS(20000)); // Update every 20 seconds
+    vTaskDelay(pdMS_TO_TICKS(15000)); // Upload data every 15 seconds
   }
 }
 
 void loop()
 {
-  // Empty loop; all work is done in FreeRTOS tasks
-  vTaskDelay(portMAX_DELAY); // Suspend loop task
+  // Empty as FreeRTOS tasks handle everything
 }
